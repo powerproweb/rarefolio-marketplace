@@ -21,3 +21,6 @@ qd_presales.csv
 # OS
 Thumbs.db
 .DS_Store
+
+# Deployment artifacts
+dist/
