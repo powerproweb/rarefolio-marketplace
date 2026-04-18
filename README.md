@@ -83,3 +83,22 @@ php -S localhost:8080
 - Begin Phase 2: Primary Sales + Ownership Index
 
 See `rarefolio_marketplace_php_site_plan.md` (Unified Blueprint v2) for the full roadmap.
+
+## Public API + Webhook Bridge (Phase 1.5)
+
+The marketplace now exposes a read-only v1 API at `/api/v1/*` consumed by
+`rarefolio.io` to power live data on `verify.html` and `nft.html`, and a
+signed outbound webhook channel for mint + ownership notifications.
+
+- **Start here**: `docs/CONFIG.md` — end-to-end config walkthrough for both sides
+- Reference: `docs/API.md` — v1 endpoints + error envelope
+- Reference: `docs/WEBHOOKS.md` — signature format + events
+- Generate the shared secret: `php scripts/gen-webhook-secret.php`
+- Smoke test the API: `php tests/test_api_router.php`
+- Signer unit test: `php tests/test_webhook_signer.php`
+
+New env vars added to `.env.example` (see `docs/CONFIG.md` for full details):
+
+- `CORS_ALLOWED_ORIGINS` (public API)
+- `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_WINDOW_SECONDS`, `TRUSTED_PROXY_HEADER`
+- `PUBLIC_SITE_WEBHOOK_URL_BASE`, `PUBLIC_SITE_WEBHOOK_SECRET` (outbound webhooks)
