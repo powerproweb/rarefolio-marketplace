@@ -20,15 +20,17 @@ final class Auth
     private const LOCKOUT_SECS  = 300; // 5 minutes
 
     /**
-     * Baked-in admin credentials (persistent fallback).
+     * Admin credentials come exclusively from the environment
+     * (`.env` -> ADMIN_USER / ADMIN_PASS, read via Config::get()).
      *
-     * These are kept intentionally hard-coded so the admin login works
-     * even if .env is deleted, overwritten during a major update, or the
-     * server is re-provisioned. If ADMIN_USER/ADMIN_PASS are present in
-     * .env, those take precedence; otherwise we fall back to these values.
+     * There is intentionally NO in-source fallback. If either value is
+     * missing or empty at runtime, `attempt()` fails closed so that a
+     * missing/clobbered .env cannot silently downgrade to a guessable
+     * credential baked into the codebase. An operator alert (error_log)
+     * is emitted so the condition is visible in server logs.
+     *
+     * Deploy contract: ship a populated .env alongside every deploy.
      */
-    private const FALLBACK_USER = 'qd_admin_legacy';
-    private const FALLBACK_PASS = '***REDACTED-ROTATED-2026-04-19***';
 
     public static function boot(): void
     {
@@ -100,13 +102,18 @@ final class Auth
             return false;
         }
 
-        // Prefer .env values; fall back to baked-in constants so the login
-        // gate never locks the operator out after an update wipes .env.
-        $expectedUser = Config::get('ADMIN_USER', '') ?: self::FALLBACK_USER;
-        $expectedPass = Config::get('ADMIN_PASS', '') ?: self::FALLBACK_PASS;
+        // Credentials come strictly from the environment. No source-code
+        // fallback: if either is missing we fail closed so a wiped .env
+        // cannot enable login with a hardcoded value.
+        $expectedUser = (string) Config::get('ADMIN_USER', '');
+        $expectedPass = (string) Config::get('ADMIN_PASS', '');
+        if ($expectedUser === '' || $expectedPass === '') {
+            error_log('[auth.php] ADMIN_USER or ADMIN_PASS missing in environment; admin login is fail-closed until .env is restored.');
+            return false;
+        }
 
-        $ok = hash_equals((string) $expectedUser, $user)
-            && hash_equals((string) $expectedPass, $pass);
+        $ok = hash_equals($expectedUser, $user)
+            && hash_equals($expectedPass, $pass);
 
         if ($ok) {
             // Reset session state, elevate.
