@@ -1,6 +1,10 @@
 # Env
 .env
+.env.*
+!.env.example
 sidecar/.env
+sidecar/.env.*
+!sidecar/.env.example
 
 # Dependencies
 vendor/
