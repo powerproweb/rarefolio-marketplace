@@ -1,0 +1,433 @@
+<?php
+/**
+ * Bulk CSV import — loads multiple tokens into qd_mint_queue in one go.
+ *
+ * CSV column format:
+ *
+ *   Required:
+ *     rarefolio_token_id  — e.g. qd-silver-0000705
+ *     collection_slug     — e.g. silverbar-01-founders
+ *     asset_name_utf8     — on-chain name, max 64 chars
+ *     title               — display name
+ *     artist              — creator
+ *     edition             — e.g. 1/8
+ *     image_ipfs          — ipfs://Qm... URI
+ *
+ *   Optional:
+ *     policy_id           — 56-char hex (blank until policy is derived)
+ *     character_name      — long character name / subtitle
+ *     description         — any length; auto-split at 64 bytes
+ *     mediaType           — default image/jpeg
+ *     website             — https://...
+ *
+ *   Custom attributes (attr_* columns):
+ *     attr_bar_serial     → attributes.bar_serial
+ *     attr_block          → attributes.block
+ *     attr_archetype      → attributes.archetype
+ *     attr_anything       → attributes.anything
+ *     (add as many attr_* columns as you like)
+ *
+ *   Custom top-level metadata (meta_* columns):
+ *     meta_certification  → metadata.certification
+ *     meta_provenance     → metadata.provenance
+ *     (add as many meta_* columns as you like)
+ *
+ * Flow:
+ *   Step 1 — Upload CSV (GET or no file)
+ *   Step 2 — Parse + validate preview (POST with file)
+ *   Step 3 — Confirm import (POST with confirmed_rows JSON)
+ */
+declare(strict_types=1);
+
+require_once __DIR__ . '/includes/bootstrap.php';
+
+use RareFolio\Cip25\Validator;
+use RareFolio\Auth;
+
+// -----------------------------------------------------------------------
+// Template download
+// -----------------------------------------------------------------------
+if (isset($_GET['download_template'])) {
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="mint-import-template.csv"');
+    $cols = [
+        'rarefolio_token_id','collection_slug','policy_id','asset_name_utf8',
+        'title','character_name','edition','artist','description',
+        'image_ipfs','mediaType','website',
+        'attr_bar_serial','attr_block','attr_archetype',
+        'attr_rarity','attr_material','attr_weight_oz',
+        'meta_certification','meta_provenance',
+    ];
+    $example = [
+        'qd-silver-0000705','silverbar-01-founders','','qd-silver-0000705',
+        'Founders #1','The Archivist — Keeper of the First Ledger','1/8','RareFolio',
+        'Keeper of the First Ledger. Member of the Rarefolio Founders collection anchored to Silver Bar I (Serial E101837).',
+        'ipfs://REPLACE_WITH_CID','image/jpeg','https://rarefolio.io',
+        'E101837','88','Archivist',
+        'Founder','Fine silver .999','100',
+        '','',
+    ];
+    $out = fopen('php://output', 'w');
+    fputcsv($out, $cols);
+    fputcsv($out, $example);
+    // Instructions row (starts with #)
+    fputcsv($out, array_map(fn($c) => match(true) {
+        $c === 'rarefolio_token_id' => '# Required. Unique token ID.',
+        $c === 'asset_name_utf8'    => '# Required. On-chain name (max 64 chars).',
+        $c === 'image_ipfs'         => '# Required. Must start with ipfs://',
+        str_starts_with($c, 'attr_') => '# Optional. Becomes attributes.' . substr($c, 5),
+        str_starts_with($c, 'meta_') => '# Optional. Becomes top-level metadata field.',
+        default => '# Optional.',
+    }, $cols));
+    fclose($out);
+    exit;
+}
+
+// -----------------------------------------------------------------------
+// Step 3 — Confirmed import
+// -----------------------------------------------------------------------
+$importResults = null;
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirmed_rows'])) {
+    $rows  = json_decode((string)($_POST['confirmed_rows'] ?? '[]'), true) ?: [];
+    $admin = Auth::currentUser() ?? 'admin';
+    $importResults = ['inserted' => 0, 'skipped' => 0, 'errors' => []];
+
+    foreach ($rows as $row) {
+        try {
+            $tid  = (string)($row['rarefolio_token_id'] ?? '');
+            $cip25Wrapped = Validator::wrap($row['policy_id'] ?: 'PENDING', $row['asset_name_utf8'], $row['asset']);
+            $pdo->prepare(
+                "INSERT INTO qd_mint_queue
+                    (rarefolio_token_id, collection_slug, policy_id, asset_name_hex,
+                     title, character_name, edition, cip25_json, image_ipfs_cid,
+                     status, created_by_admin)
+                 VALUES (:tid, :coll, :pol, :ahex, :title, :cname, :ed, :js, :cid, 'draft', :admin)"
+            )->execute([
+                'tid'   => $tid,
+                'coll'  => $row['collection_slug'],
+                'pol'   => $row['policy_id'] ?: null,
+                'ahex'  => bin2hex($row['asset_name_utf8']),
+                'title' => $row['title'],
+                'cname' => $row['character_name'] ?: null,
+                'ed'    => $row['edition'] ?: null,
+                'js'    => json_encode($cip25Wrapped, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+                'cid'   => extractCidImport($row['image_ipfs'] ?? ''),
+                'admin' => $admin,
+            ]);
+            $importResults['inserted']++;
+        } catch (Throwable $e) {
+            $importResults['errors'][] = ($row['rarefolio_token_id'] ?? '?') . ': ' . $e->getMessage();
+            $importResults['skipped']++;
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Step 2 — Parse + validate uploaded file
+// -----------------------------------------------------------------------
+$preview = null;   // null = no file yet; array = preview rows
+$parseError = null;
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['csv_file']) && $importResults === null) {
+    $file = $_FILES['csv_file'];
+    if ($file['error'] !== UPLOAD_ERR_OK) {
+        $parseError = 'Upload error code ' . $file['error'];
+    } else {
+        $handle = fopen($file['tmp_name'], 'r');
+        if (!$handle) {
+            $parseError = 'Could not open uploaded file.';
+        } else {
+            $headers = null;
+            $preview = [];
+            $lineNum = 0;
+
+            while (($row = fgetcsv($handle)) !== false) {
+                $lineNum++;
+                // Skip comment rows (first cell starts with #)
+                if (str_starts_with(trim($row[0] ?? ''), '#')) continue;
+                // First non-comment row = headers
+                if ($headers === null) {
+                    $headers = array_map('trim', $row);
+                    continue;
+                }
+                if (count($row) < count($headers)) {
+                    $row = array_pad($row, count($headers), '');
+                }
+                $data = array_combine($headers, array_map('trim', $row));
+                if (!$data) continue;
+
+                // Skip fully blank rows
+                if (implode('', array_values($data)) === '') continue;
+
+                $preview[] = parseImportRow($data, $lineNum);
+            }
+            fclose($handle);
+
+            if ($headers === null) {
+                $parseError = 'CSV appears to have no header row.';
+                $preview = null;
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------
+function extractCidImport(string $ipfsUri): ?string
+{
+    if (preg_match('#^ipfs://([A-Za-z0-9/._-]+)#', $ipfsUri, $m)) return $m[1];
+    return null;
+}
+
+/**
+ * Parse one CSV data row into a validated preview entry.
+ *
+ * @param  array<string,string> $data
+ * @return array<string,mixed>  {line, token_id, asset, errors, warnings, status, serialized}
+ */
+function parseImportRow(array $data, int $line): array
+{
+    $tid        = $data['rarefolio_token_id'] ?? '';
+    $collSlug   = $data['collection_slug']    ?? '';
+    $policyId   = $data['policy_id']          ?? '';
+    $assetName  = $data['asset_name_utf8']    ?? '';
+    $title      = $data['title']              ?? '';
+    $charName   = $data['character_name']     ?? '';
+    $edition    = $data['edition']            ?? '';
+    $artist     = $data['artist']             ?? '';
+    $description = $data['description']       ?? '';
+    $imageIpfs  = $data['image_ipfs']         ?? '';
+    $mediaType  = $data['mediaType']          ?: 'image/jpeg';
+    $website    = $data['website']            ?? '';
+
+    // Build attributes from attr_* columns
+    $attributes = [];
+    foreach ($data as $col => $val) {
+        if (str_starts_with($col, 'attr_') && $val !== '') {
+            $attributes[substr($col, 5)] = $val;
+        }
+    }
+
+    // Build top-level custom metadata fields from meta_* columns
+    $customMeta = [];
+    foreach ($data as $col => $val) {
+        if (str_starts_with($col, 'meta_') && $val !== '') {
+            $customMeta[substr($col, 5)] = $val;
+        }
+    }
+
+    // Assemble the CIP-25 asset object
+    $asset = array_filter([
+        'name'               => $title,
+        'image'              => $imageIpfs,
+        'mediaType'          => $mediaType,
+        'description'        => $description !== '' ? $description : null,
+        'artist'             => $artist,
+        'edition'            => $edition,
+        'attributes'         => !empty($attributes) ? $attributes : null,
+        'rarefolio_token_id' => $tid,
+        'collection'         => $collSlug,
+        'website'            => $website !== '' ? $website : null,
+    ] + $customMeta, static fn($v) => $v !== null && $v !== '');
+
+    // Sanitise (auto-split long strings)
+    $asset = Validator::sanitize($asset);
+
+    // Validate
+    $result   = Validator::validate($asset);
+    $errors   = $result['errors'];
+    $warnings = $result['warnings'];
+
+    // Extra checks
+    if ($tid === '')       $errors[] = 'rarefolio_token_id is required.';
+    if ($assetName === '') $errors[] = 'asset_name_utf8 is required.';
+    if ($collSlug === '')  $errors[] = 'collection_slug is required.';
+    if ($policyId !== '' && !preg_match('/^[0-9a-f]{56}$/i', $policyId)) {
+        $errors[] = 'policy_id must be 56 hex chars (or left blank).';
+    }
+
+    $status = match(true) {
+        !empty($errors)   => 'error',
+        !empty($warnings) => 'warning',
+        default           => 'ok',
+    };
+
+    return [
+        'line'            => $line,
+        'rarefolio_token_id' => $tid,
+        'collection_slug' => $collSlug,
+        'policy_id'       => $policyId,
+        'asset_name_utf8' => $assetName,
+        'title'           => $title,
+        'character_name'  => $charName,
+        'edition'         => $edition,
+        'image_ipfs'      => $imageIpfs,
+        'asset'           => $asset,
+        'errors'          => $errors,
+        'warnings'        => $warnings,
+        'status'          => $status,
+    ];
+}
+
+$pageTitle = 'Bulk mint import — RareFolio admin';
+require __DIR__ . '/includes/header.php';
+?>
+
+<div class="rf-toolbar">
+    <a href="/admin/mint.php" class="rf-btn rf-btn-ghost">&larr; Mint queue</a>
+    <div class="rf-spacer"></div>
+    <a href="/admin/mint-import.php?download_template=1" class="rf-btn rf-btn-ghost">↓ Download CSV template</a>
+</div>
+
+<h1>Bulk mint import</h1>
+<p class="rf-mono">Upload a CSV spreadsheet to load multiple tokens into the mint queue at once. Each valid row becomes a <code>draft</code> queue entry.</p>
+
+<?php if ($importResults !== null): ?>
+    <div class="rf-alert rf-alert-ok">
+        Import complete &mdash; <?= $importResults['inserted'] ?> rows inserted, <?= $importResults['skipped'] ?> skipped.
+        <a href="/admin/mint.php">View mint queue &rarr;</a>
+    </div>
+    <?php foreach ($importResults['errors'] as $e): ?>
+        <div class="rf-alert rf-alert-error"><?= h($e) ?></div>
+    <?php endforeach; ?>
+<?php endif; ?>
+
+<?php if ($parseError): ?>
+    <div class="rf-alert rf-alert-error"><?= h($parseError) ?></div>
+<?php endif; ?>
+
+<!-- ------------------------------------------------------------------- -->
+<!-- Step 1: Upload form (shown when no preview yet)                      -->
+<!-- ------------------------------------------------------------------- -->
+<?php if ($preview === null && $importResults === null): ?>
+
+<div style="background:var(--rf-surface);border:1px solid var(--rf-border);border-radius:4px;padding:1.5rem;max-width:700px;margin-bottom:2rem;">
+    <h2 style="margin-top:0">CSV column guide</h2>
+    <table class="rf-table" style="font-size:0.8rem;">
+        <thead><tr><th>Column</th><th>Required</th><th>Notes</th></tr></thead>
+        <tbody>
+        <tr><td class="rf-mono">rarefolio_token_id</td><td>Yes</td><td>Unique ID, e.g. <code>qd-silver-0000705</code></td></tr>
+        <tr><td class="rf-mono">collection_slug</td><td>Yes</td><td>Matches <code>qd_tokens.collection_slug</code></td></tr>
+        <tr><td class="rf-mono">asset_name_utf8</td><td>Yes</td><td>On-chain name, max 64 chars</td></tr>
+        <tr><td class="rf-mono">title</td><td>Yes</td><td>Display name</td></tr>
+        <tr><td class="rf-mono">artist</td><td>Yes</td><td>Creator name</td></tr>
+        <tr><td class="rf-mono">edition</td><td>Yes</td><td>e.g. <code>1/8</code></td></tr>
+        <tr><td class="rf-mono">image_ipfs</td><td>Yes</td><td>Must start with <code>ipfs://</code></td></tr>
+        <tr><td class="rf-mono">policy_id</td><td>No</td><td>56 hex chars; leave blank until derived</td></tr>
+        <tr><td class="rf-mono">character_name</td><td>No</td><td>Subtitle / archetype label</td></tr>
+        <tr><td class="rf-mono">description</td><td>No</td><td>Any length — auto-split at 64 bytes</td></tr>
+        <tr><td class="rf-mono">mediaType</td><td>No</td><td>Default: <code>image/jpeg</code></td></tr>
+        <tr><td class="rf-mono">website</td><td>No</td><td>Full URL</td></tr>
+        <tr><td class="rf-mono">attr_*</td><td>No</td><td>Any <code>attr_foo</code> → <code>attributes.foo</code>. Add as many as you like.</td></tr>
+        <tr><td class="rf-mono">meta_*</td><td>No</td><td>Any <code>meta_foo</code> → top-level metadata field <code>foo</code></td></tr>
+        </tbody>
+    </table>
+</div>
+
+<form method="post" enctype="multipart/form-data" class="rf-form" style="max-width:500px">
+    <label>Upload CSV file</label>
+    <input type="file" name="csv_file" accept=".csv,text/csv" required>
+    <div class="rf-toolbar" style="margin-top:1rem">
+        <button type="submit" class="rf-btn">Upload &amp; validate &rarr;</button>
+    </div>
+</form>
+
+<?php endif; ?>
+
+<!-- ------------------------------------------------------------------- -->
+<!-- Step 2: Validation preview                                           -->
+<!-- ------------------------------------------------------------------- -->
+<?php if ($preview !== null && $importResults === null): ?>
+
+<?php
+$countOk   = count(array_filter($preview, fn($r) => $r['status'] === 'ok'));
+$countWarn = count(array_filter($preview, fn($r) => $r['status'] === 'warning'));
+$countErr  = count(array_filter($preview, fn($r) => $r['status'] === 'error'));
+$validRows = array_filter($preview, fn($r) => $r['status'] !== 'error');
+?>
+
+<div class="rf-alert rf-alert-ok" style="margin-bottom:1rem">
+    <?= count($preview) ?> rows parsed &mdash;
+    <strong><?= $countOk ?> clean</strong>,
+    <?= $countWarn ?> with warnings,
+    <?= $countErr ?> with errors.
+    <?php if ($countErr > 0): ?>
+        Error rows will be skipped. Fix them in your spreadsheet and re-upload, or proceed with the <?= count($validRows) ?> valid rows below.
+    <?php endif; ?>
+</div>
+
+<table class="rf-table" style="font-size:0.8rem;">
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>Token ID</th>
+            <th>Title</th>
+            <th>Collection</th>
+            <th>Edition</th>
+            <th>Image</th>
+            <th>Status</th>
+            <th>Messages</th>
+        </tr>
+    </thead>
+    <tbody>
+    <?php foreach ($preview as $row): ?>
+        <?php
+        $rowColor = match($row['status']) {
+            'error'   => 'background:rgba(220,50,50,0.08)',
+            'warning' => 'background:rgba(220,160,0,0.08)',
+            default   => '',
+        };
+        ?>
+        <tr style="<?= $rowColor ?>">
+            <td class="rf-mono"><?= (int)$row['line'] ?></td>
+            <td class="rf-mono"><?= h($row['rarefolio_token_id']) ?></td>
+            <td><?= h($row['title']) ?></td>
+            <td class="rf-mono"><?= h($row['collection_slug']) ?></td>
+            <td class="rf-mono"><?= h($row['edition']) ?></td>
+            <td class="rf-mono" style="font-size:0.7rem">
+                <?php if (str_starts_with($row['image_ipfs'], 'ipfs://')): ?>
+                    <span style="color:var(--rf-ok)"><?= h(substr($row['image_ipfs'], 0, 30)) ?>&hellip;</span>
+                <?php else: ?>
+                    <span style="color:var(--rf-error)"><?= h(substr($row['image_ipfs'] ?: '(missing)', 0, 30)) ?></span>
+                <?php endif; ?>
+            </td>
+            <td>
+                <span class="rf-pill rf-pill-<?= $row['status'] === 'ok' ? 'confirmed' : ($row['status'] === 'warning' ? 'submitted' : 'failed') ?>">
+                    <?= h($row['status']) ?>
+                </span>
+            </td>
+            <td style="font-size:0.75rem">
+                <?php foreach ($row['errors'] as $e): ?>
+                    <div style="color:var(--rf-error)">&times; <?= h($e) ?></div>
+                <?php endforeach; ?>
+                <?php foreach ($row['warnings'] as $w): ?>
+                    <div style="color:var(--rf-warn)">&bull; <?= h($w) ?></div>
+                <?php endforeach; ?>
+            </td>
+        </tr>
+    <?php endforeach; ?>
+    </tbody>
+</table>
+
+<?php if (!empty($validRows)): ?>
+<form method="post" style="margin-top:1.5rem">
+    <input type="hidden" name="confirmed_rows" value="<?= h(json_encode(array_values($validRows), JSON_UNESCAPED_UNICODE)) ?>">
+    <div class="rf-toolbar">
+        <button type="submit" class="rf-btn">
+            Import <?= count($validRows) ?> valid row<?= count($validRows) !== 1 ? 's' : '' ?> as draft &rarr;
+        </button>
+        <a href="/admin/mint-import.php" class="rf-btn rf-btn-ghost">Start over</a>
+    </div>
+    <p class="rf-mono" style="font-size:0.8rem;margin-top:0.5rem;">
+        Rows are added as <code>draft</code> status. Change each to <code>ready</code> in the mint queue when you\\'re ready to mint.
+    </p>
+</form>
+<?php else: ?>
+<div class="rf-alert rf-alert-error" style="margin-top:1rem">No valid rows to import. Fix the errors in your spreadsheet and re-upload.</div>
+<p><a href="/admin/mint-import.php" class="rf-btn rf-btn-ghost">Start over</a></p>
+<?php endif; ?>
+
+<?php endif; ?>
+
+<?php require __DIR__ . '/includes/footer.php'; ?>

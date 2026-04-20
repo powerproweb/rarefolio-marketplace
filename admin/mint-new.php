@@ -15,9 +15,11 @@ use RareFolio\Cip25\Validator;
 $errors   = [];
 $warnings = [];
 $ok       = null;
+$loadedFrom = null;   // token ID that pre-filled this form
+
 $form = [
     'rarefolio_token_id' => '',
-    'collection_slug'    => 'genesis',
+    'collection_slug'    => 'silverbar-01-founders',
     'asset_name_utf8'    => '',
     'policy_id'          => '',
     'title'              => '',
@@ -25,11 +27,78 @@ $form = [
     'artist'             => '',
     'edition'            => '',
     'image_ipfs'         => '',
-    'mediaType'          => 'image/png',
+    'mediaType'          => 'image/jpeg',
     'description'        => '',
     'website'            => '',
     'attributes_json'    => '{}',
 ];
+
+// -------------------------------------------------------------------------
+// Pre-fill from an existing qd_tokens row (?from=TOKEN_ID)
+// -------------------------------------------------------------------------
+if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['from'])) {
+    $fromId = trim((string) $_GET['from']);
+    $tStmt  = $pdo->prepare('SELECT * FROM qd_tokens WHERE rarefolio_token_id = ? LIMIT 1');
+    $tStmt->execute([$fromId]);
+    $tRow = $tStmt->fetch();
+
+    if ($tRow) {
+        $loadedFrom = $fromId;
+        $cip25 = json_decode((string)($tRow['cip25_json'] ?? '{}'), true) ?: [];
+
+        // Join description array back to a single string for the textarea
+        $desc = $cip25['description'] ?? '';
+        if (is_array($desc)) {
+            $desc = implode('', $desc);
+        }
+
+        // Extract the image URI (may be an array from sanitize)
+        $image = $cip25['image'] ?? '';
+        if (is_array($image)) {
+            $image = implode('', $image);
+        }
+
+        // Everything except known simple fields goes into attributes
+        $knownKeys = ['name','image','mediaType','description','artist','edition',
+                      'rarefolio_token_id','collection','website'];
+        $attrs = [];
+        foreach ($cip25 as $k => $v) {
+            if (!in_array($k, $knownKeys, true) && $k !== 'attributes') {
+                $attrs[$k] = is_array($v) ? implode('', $v) : $v;
+            }
+        }
+        // Merge explicit attributes object
+        if (!empty($cip25['attributes']) && is_array($cip25['attributes'])) {
+            $attrs = array_merge($attrs, $cip25['attributes']);
+        }
+
+        $form = [
+            'rarefolio_token_id' => $tRow['rarefolio_token_id'],
+            'collection_slug'    => $tRow['collection_slug'],
+            'asset_name_utf8'    => $tRow['asset_name_utf8'] ?? hex2bin($tRow['asset_name_hex'] ?? '') ?: '',
+            'policy_id'          => ($tRow['policy_id'] !== '0000000000000000000000000000000000000000000000000000000000' ?
+                                     $tRow['policy_id'] : '') ?? '',
+            'title'              => $tRow['title'],
+            'character_name'     => $tRow['character_name'] ?? '',
+            'artist'             => $tRow['artist'] ?? '',
+            'edition'            => $tRow['edition'] ?? '',
+            'image_ipfs'         => $image,
+            'mediaType'          => $cip25['mediaType'] ?? 'image/jpeg',
+            'description'        => $desc,
+            'website'            => $cip25['website'] ?? '',
+            'attributes_json'    => $attrs ? json_encode($attrs, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) : '{}',
+        ];
+    }
+}
+
+// Load list of unminted tokens for the dropdown
+$unmintedTokens = $pdo->query(
+    "SELECT rarefolio_token_id, title, collection_slug
+       FROM qd_tokens
+      WHERE primary_sale_status = 'unminted'
+        AND rarefolio_token_id NOT IN (SELECT rarefolio_token_id FROM qd_mint_queue)
+      ORDER BY rarefolio_token_id"
+)->fetchAll();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     foreach ($form as $k => $_) {
@@ -123,8 +192,41 @@ $pageTitle = 'New mint — RareFolio admin';
 require __DIR__ . '/includes/header.php';
 ?>
 
-<h1>New mint</h1>
-<p class="rf-mono">Build a CIP-25 metadata record and enqueue it. Validation runs on save; warnings don't block.</p>
+<div class="rf-toolbar">
+    <h1 style="margin:0">New mint</h1>
+    <div class="rf-spacer"></div>
+    <a href="/admin/mint-import.php" class="rf-btn rf-btn-ghost">Bulk CSV import</a>
+</div>
+<p class="rf-mono">Build a CIP-25 metadata record and enqueue it. Validation runs on save; warnings don\'t block.</p>
+
+<?php if (!empty($unmintedTokens)): ?>
+<div style="background:var(--rf-surface);border:1px solid var(--rf-border);border-radius:4px;padding:1rem;margin-bottom:1.5rem;">
+    <strong class="rf-mono">Load from existing token</strong>
+    <p class="rf-mono" style="font-size:0.8rem;margin:0.4rem 0;">Pre-fills all fields from a seeded <code>qd_tokens</code> row (e.g. Founders tokens). You can edit before saving.</p>
+    <div style="display:grid;grid-template-columns:1fr auto;gap:0.75rem;align-items:center;">
+        <select id="load-token-select">
+            <option value="">-- select a token --</option>
+            <?php foreach ($unmintedTokens as $ut): ?>
+                <option value="<?= h($ut['rarefolio_token_id']) ?>"<?= $loadedFrom === $ut['rarefolio_token_id'] ? ' selected' : '' ?>>
+                    <?= h($ut['rarefolio_token_id']) ?> &mdash; <?= h($ut['title']) ?>
+                </option>
+            <?php endforeach; ?>
+        </select>
+        <button type="button" class="rf-btn" onclick="loadToken()">Load &rarr;</button>
+    </div>
+    <?php if ($loadedFrom): ?>
+        <div class="rf-mono" style="font-size:0.8rem;color:var(--rf-ok);margin-top:0.4rem;">
+            ✓ Pre-filled from <strong><?= h($loadedFrom) ?></strong>. Review and save below.
+        </div>
+    <?php endif; ?>
+</div>
+<script>
+function loadToken() {
+    const v = document.getElementById('load-token-select').value;
+    if (v) window.location.href = '/admin/mint-new.php?from=' + encodeURIComponent(v);
+}
+</script>
+<?php endif; ?>
 
 <?php if ($ok !== null): ?>
     <div class="rf-alert rf-alert-ok"><?= h($ok) ?> &mdash; <a href="/admin/mint.php">back to queue</a></div>

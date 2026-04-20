@@ -15,6 +15,7 @@
         <a href="/admin/collections.php">Collections</a>
         <a href="/admin/mint.php">Mint queue</a>
         <a href="/admin/mint-new.php">New mint</a>
+        <a href="/admin/mint-import.php">Bulk import</a>
         <a href="/admin/asset-lookup.php">Asset lookup</a>
         <?php if (class_exists('RareFolio\\Auth') && \RareFolio\Auth::isLoggedIn()): ?>
             <span class="rf-admin-user"><?= h((string) \RareFolio\Auth::currentUser()) ?></span>
