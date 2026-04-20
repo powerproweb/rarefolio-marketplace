@@ -1,32 +1,43 @@
 /**
- * RareFolio Cardano sidecar.
+ * RareFolio Cardano sidecar  —  Phase 2
  *
- * Phase 1 scope:
- *   GET  /health              liveness probe
- *   GET  /asset/:unit         lookup asset via Blockfrost (includes CIP-25 metadata)
- *   POST /mint/prepare        stub — returns payload shape (real tx build in Phase 2)
- *   GET  /handle/:handle      ADA Handle -> address resolution stub
+ * Routes:
+ *   GET  /health                  liveness probe
+ *   GET  /asset/:unit             Blockfrost asset lookup + CIP-25 metadata
+ *   GET  /policy/:policyId/assets all assets under a policy
+ *   POST /mint/prepare            build + sign a real Cardano minting tx
+ *   POST /mint/submit             submit a signed tx CBOR via Blockfrost
+ *   GET  /mint/policy-id          derive policy ID from POLICY_MNEMONIC
+ *   GET  /sync/token/:unit        current owner lookup for a single asset
+ *   GET  /sync/policy/:policyId   bulk ownership sync for a full policy
+ *   GET  /handle/:handle          ADA Handle -> address resolution
  */
 import 'dotenv/config';
 import express from 'express';
-import { mountMintRoutes } from './routes/mint.js';
+import { mountMintRoutes }  from './routes/mint.js';
 import { mountAssetRoutes } from './routes/asset.js';
 import { mountHandleRoutes } from './routes/handle.js';
+import { mountSyncRoutes }  from './routes/sync.js';
+
+const VERSION = '0.2.0';
 
 const app = express();
 app.use(express.json({ limit: '512kb' }));
 
 app.get('/health', (_req, res) => {
+    const policyConfigured = Boolean(process.env.POLICY_MNEMONIC?.trim());
     res.json({
-        ok: true,
-        service: 'rarefolio-sidecar',
-        version: '0.1.0',
-        network: process.env.BLOCKFROST_NETWORK ?? 'preprod',
+        ok:               true,
+        service:          'rarefolio-sidecar',
+        version:          VERSION,
+        network:          process.env.BLOCKFROST_NETWORK ?? 'preprod',
+        policy_ready:     policyConfigured,
     });
 });
 
 mountAssetRoutes(app);
 mountMintRoutes(app);
+mountSyncRoutes(app);
 mountHandleRoutes(app);
 
 // Generic 404

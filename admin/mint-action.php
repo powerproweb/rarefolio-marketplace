@@ -100,6 +100,24 @@ try {
             respond(['ok' => true, 'tx' => $tx], 200, $isJson, $id, 'Confirmed on-chain. qd_tokens row created.');
             break;
 
+        case 'submit_json':
+            $cbor = (string) ($body['cbor_hex'] ?? '');
+            if ($cbor === '') {
+                respond(['error' => 'missing cbor_hex'], 400, true, $id);
+            }
+            $sidecar  = new SidecarClient();
+            $submitted = $sidecar->submitMint($cbor);
+            $txHash   = (string) ($submitted['tx_hash'] ?? '');
+            if ($txHash !== '') {
+                $pdo->prepare(
+                    "UPDATE qd_mint_queue
+                        SET tx_hash = ?, status = 'submitted', submitted_at = NOW(), updated_at = NOW()
+                        WHERE id = ?"
+                )->execute([$txHash, $id]);
+            }
+            respond($submitted, 200, true, $id);
+            break;
+
         case 'fail':
             $msg = (string) ($body['message'] ?? 'manually marked failed');
             $pdo->prepare(

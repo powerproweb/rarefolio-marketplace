@@ -87,7 +87,10 @@ require __DIR__ . '/includes/header.php';
         </button>
     </form>
     <button class="rf-btn" id="btn-sign" <?= $row['status'] !== 'ready' ? 'disabled' : '' ?>>
-        2) Sign with CIP-30 wallet
+        1) Build &amp; sign tx (sidecar)
+    </button>
+    <button class="rf-btn" id="btn-submit" disabled>
+        2) Submit to chain
     </button>
     <form method="post" action="/admin/mint-action.php" style="display:inline">
         <input type="hidden" name="id" value="<?= (int)$row['id'] ?>">
@@ -113,92 +116,97 @@ require __DIR__ . '/includes/header.php';
     <?php endif; ?>
 </div>
 
-<h3>Sidecar response</h3>
-<pre class="rf-code" id="sidecar-output">(no request yet — click "1) Ask sidecar to prepare")</pre>
+<h3>1) Sidecar — build &amp; sign tx</h3>
+<pre class="rf-code" id="sidecar-output">(click "1) Build &amp; sign" to ask the sidecar to prepare a real tx)</pre>
 
-<h3>Wallet sign result</h3>
-<pre class="rf-code" id="sign-output">(no signature yet — click "2) Sign with CIP-30 wallet")</pre>
+<h3>2) Submit to chain</h3>
+<pre class="rf-code" id="submit-output">(awaiting a signed CBOR from step 1)</pre>
 
 <script>
 /**
- * CIP-30 wallet sign flow (Phase 1 stub-aware).
+ * Phase 2 mint flow — server-side signing via POLICY_MNEMONIC.
  *
- * Phase 1: the sidecar returns a stub envelope (no real cbor_hex).
- *          We simulate the signing by calling wallet.getUsedAddresses()
- *          and posting the result back to the server for record-keeping.
+ * Step 1  "Build & sign":
+ *   Calls POST /admin/mint-action.php (action=prepare_json).
+ *   The PHP proxies to the sidecar POST /mint/prepare, which builds and
+ *   signs the tx with the policy wallet.  Response: { cbor_hex, policy_id }.
  *
- * Phase 2: sidecar returns { cbor_hex }, and this code calls
- *          wallet.signTx(cbor_hex, true) then wallet.submitTx(signed).
+ * Step 2  "Submit":
+ *   Calls POST /admin/mint-action.php (action=submit_json) with the cbor_hex.
+ *   The PHP proxies to the sidecar POST /mint/submit, which broadcasts via
+ *   Blockfrost.  Response: { tx_hash }.  tx_hash is then recorded server-side.
+ *
+ * (Legacy CIP-30 path: if you ever want the admin wallet to sign instead,
+ *  wire api.signTx(cbor_hex, false) before the submit step.)
  */
 (function () {
-    const btn    = document.getElementById('btn-sign');
-    const outSc  = document.getElementById('sidecar-output');
-    const outSig = document.getElementById('sign-output');
-    const rowId  = <?= (int)$row['id'] ?>;
+    const btnBuild  = document.getElementById('btn-sign');  // reuse existing button
+    const outSc     = document.getElementById('sidecar-output');
+    const outSubmit = document.getElementById('submit-output');
+    const rowId     = <?= (int)$row['id'] ?>;
 
-    async function pickWallet() {
-        const candidates = ['nami', 'eternl', 'lace', 'flint', 'typhon', 'yoroi'];
-        const cardano = window.cardano;
-        if (!cardano) throw new Error('No CIP-30 wallet detected. Install Nami, Eternl, Lace, etc.');
-        for (const key of candidates) {
-            if (cardano[key]) return { key, api: await cardano[key].enable() };
-        }
-        // fall back: pick the first available provider
-        const anyKey = Object.keys(cardano).find(k => typeof cardano[k]?.enable === 'function');
-        if (!anyKey) throw new Error('No CIP-30 compatible wallet found.');
-        return { key: anyKey, api: await cardano[anyKey].enable() };
-    }
+    let pendingCbor = null;
 
-    async function fetchSidecarPayload() {
-        // Reload the detail page row's latest sidecar payload from its most recent action
-        const resp = await fetch(`/admin/mint-action.php?id=${rowId}&action=prepare`, { method: 'POST' });
-        if (!resp.ok) throw new Error(`prepare failed: ${resp.status}`);
-        return resp.json();
-    }
-
-    if (btn) btn.addEventListener('click', async () => {
-        btn.disabled = true;
-        outSig.textContent = 'Connecting to wallet…';
+    // ------------------------------------------------------------------ step 1
+    if (btnBuild) btnBuild.addEventListener('click', async () => {
+        btnBuild.disabled = true;
+        outSc.textContent = 'Calling sidecar to build + sign tx…';
+        outSubmit.textContent = '(awaiting step 1)';
+        pendingCbor = null;
         try {
-            const { key, api } = await pickWallet();
-            outSig.textContent = `Connected: ${key}. Fetching used addresses…`;
-            const used = await api.getUsedAddresses();
-            const recipient = (used && used[0]) || null;
-
-            outSc.textContent = 'Calling sidecar /mint/prepare …';
-            const prep = await fetch('/admin/mint-action.php', {
-                method: 'POST',
+            const resp = await fetch('/admin/mint-action.php', {
+                method:  'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id: rowId, action: 'prepare_json', recipient_addr_hex: recipient }),
-            }).then(r => r.json());
+                body:    JSON.stringify({ id: rowId, action: 'prepare_json' }),
+            });
+            const data = await resp.json();
+            outSc.textContent = JSON.stringify(data, null, 2);
 
-            outSc.textContent = JSON.stringify(prep, null, 2);
-
-            if (prep.stub) {
-                outSig.textContent =
-                    `Sidecar returned a Phase 1 stub (no real cbor_hex yet).\n` +
-                    `Wallet: ${key}\n` +
-                    `Recipient (hex): ${recipient}\n` +
-                    `\n` +
-                    `Phase 2 will pass cbor_hex to wallet.signTx() + submitTx().`;
-            } else if (prep.cbor_hex) {
-                outSig.textContent = `Signing tx via ${key}…`;
-                const witness = await api.signTx(prep.cbor_hex, true);
-                const txHash = await api.submitTx(witness);
-                outSig.textContent = `Submitted. tx_hash: ${txHash}`;
-                // Record the tx_hash server-side
-                await fetch('/admin/mint-action.php', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id: rowId, action: 'record_tx', tx_hash: txHash }),
-                });
+            if (data.error) {
+                outSubmit.textContent = 'Step 1 failed: ' + data.error;
+                return;
+            }
+            if (data.cbor_hex) {
+                pendingCbor = data.cbor_hex;
+                outSubmit.textContent =
+                    `Signed CBOR ready (${data.cbor_hex.length} chars).\n` +
+                    `policy_id: ${data.policy_id ?? '(see above)'}\n\n` +
+                    `Click "2) Submit to chain" to broadcast.`;
+                document.getElementById('btn-submit')?.removeAttribute('disabled');
             } else {
-                outSig.textContent = 'Unexpected sidecar response:\n' + JSON.stringify(prep, null, 2);
+                outSubmit.textContent = 'No cbor_hex in response — check sidecar logs.';
             }
         } catch (e) {
-            outSig.textContent = 'ERROR: ' + (e && e.message ? e.message : String(e));
+            outSc.textContent = 'ERROR: ' + (e?.message ?? String(e));
         } finally {
-            btn.disabled = false;
+            btnBuild.disabled = false;
+        }
+    });
+
+    // ------------------------------------------------------------------ step 2
+    document.getElementById('btn-submit')?.addEventListener('click', async () => {
+        if (!pendingCbor) {
+            outSubmit.textContent = 'No signed CBOR available — run step 1 first.';
+            return;
+        }
+        document.getElementById('btn-submit').disabled = true;
+        outSubmit.textContent = 'Submitting to Cardano via sidecar…';
+        try {
+            const resp = await fetch('/admin/mint-action.php', {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ id: rowId, action: 'submit_json', cbor_hex: pendingCbor }),
+            });
+            const data = await resp.json();
+            outSubmit.textContent = JSON.stringify(data, null, 2);
+            if (data.tx_hash) {
+                outSubmit.textContent += '\n\n✓ tx recorded. Use "Check confirmation" above to verify on-chain.';
+                pendingCbor = null;
+            }
+        } catch (e) {
+            outSubmit.textContent = 'ERROR: ' + (e?.message ?? String(e));
+        } finally {
+            document.getElementById('btn-submit').disabled = false;
         }
     });
 })();

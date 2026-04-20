@@ -42,6 +42,33 @@ final class Client
     }
 
     /**
+     * Submit a signed transaction CBOR via the sidecar (which calls Blockfrost).
+     *
+     * @return array<string,mixed>  { tx_hash: string } on success
+     */
+    public function submitMint(string $cborHex): array
+    {
+        return $this->post('/mint/submit', ['cbor_hex' => $cborHex]);
+    }
+
+    /**
+     * Fetch current on-chain owner of an asset via the sidecar.
+     *
+     * @return array<string,mixed>|null  null when not found on chain
+     */
+    public function syncToken(string $unit): ?array
+    {
+        try {
+            return $this->get("/sync/token/$unit");
+        } catch (RuntimeException $e) {
+            if (str_contains($e->getMessage(), 'HTTP 404')) {
+                return null;
+            }
+            throw $e;
+        }
+    }
+
+    /**
      * Ask the sidecar about a specific asset (it will call Blockfrost + decode CIP-25).
      *
      * @return array<string,mixed>|null

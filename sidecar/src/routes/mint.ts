@@ -1,58 +1,192 @@
-import type { Express } from 'express';
+import type { Express, Request, Response, NextFunction } from 'express';
+import { Transaction, type Mint } from '@meshsdk/core';
+import { bf } from '../lib/blockfrost.js';
+import { getPolicyWallet, getForgingScript, getPolicyId } from '../lib/policy.js';
 import { z } from 'zod';
+
+// ---------------------------------------------------------------------------
+// Request schemas
+// ---------------------------------------------------------------------------
 
 /**
  * POST /mint/prepare
  *
- * Phase 1: returns the *shape* of the payload the wallet will be asked to sign.
- *          Real tx building lands in Phase 2 once the Cardano tx builder
- *          (lucid-cardano / @meshsdk/core / serialization-lib) is wired in.
+ * Builds and server-signs a real Cardano minting transaction.
+ * The policy wallet (POLICY_MNEMONIC) pays the tx fee and provides the
+ * policy-script witness.  The signed CBOR is returned for the caller to
+ * either inspect or submit immediately via POST /mint/submit.
+ *
+ * recipient_addr  — bech32 (addr1...) OR hex-encoded CBOR from CIP-30
+ *                   getUsedAddresses().  Both forms are accepted.
  */
 const MintRequest = z.object({
-    rarefolio_token_id: z.string().regex(/^RF-\d{4,6}$/),
-    collection_slug:    z.string().min(1),
-    policy_id:          z.string().regex(/^[0-9a-f]{56}$/i).optional(),
+    rarefolio_token_id: z.string().min(3).max(64),
+    collection_slug:    z.string().min(1).max(64),
     asset_name_utf8:    z.string().min(1).max(64),
-    recipient_addr:     z.string().startsWith('addr'),
-    cip25:              z.record(z.any()), // the wrapped 721 object
+    recipient_addr:     z.string().min(10),   // bech32 or hex CBOR
+    cip25:              z.record(z.any()),     // the per-token CIP-25 metadata
 });
 
+/** POST /mint/submit — submits a signed tx CBOR via Blockfrost. */
+const SubmitRequest = z.object({
+    cbor_hex: z.string().min(10),
+});
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * CIP-30's getUsedAddresses() returns addresses as hex-encoded CBOR.
+ * Mesh expects bech32.  If the value doesn't start with 'addr', try to
+ * decode it as a Blockfrost-style hex address.
+ *
+ * For now we accept it as-is; Mesh internally handles hex CBOR addresses
+ * when fed through resolveDataHash or similar utilities.  If the address
+ * starts with 'addr' it is already bech32 and passed through unchanged.
+ */
+function normaliseAddress(raw: string): string {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('addr')) return trimmed;          // already bech32
+    // Hex CBOR — leave for Mesh to decode internally;
+    // strip any leading 0x prefix that some wallets add.
+    return trimmed.startsWith('0x') ? trimmed.slice(2) : trimmed;
+}
+
+// ---------------------------------------------------------------------------
+// Route mounts
+// ---------------------------------------------------------------------------
+
 export function mountMintRoutes(app: Express): void {
-    app.post('/mint/prepare', (req, res) => {
+
+    /**
+     * GET /mint/policy-id
+     *
+     * Returns the policy ID derived from POLICY_MNEMONIC + POLICY_LOCK_SLOT.
+     * Call this once before minting to record the policy_id in qd_tokens.
+     */
+    app.get('/mint/policy-id', (_req: Request, res: Response) => {
+        try {
+            const policyId    = getPolicyId();
+            const policyAddr  = getPolicyWallet().getPaymentAddress();
+            const lockSlot    = process.env.POLICY_LOCK_SLOT?.trim() || null;
+            res.json({
+                policy_id:    policyId,
+                policy_addr:  policyAddr,
+                lock_slot:    lockSlot ? Number(lockSlot) : null,
+                script_type:  lockSlot ? 'RequireAllOf(sig, before)' : 'RequireSignature',
+            });
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            res.status(500).json({ error: msg });
+        }
+    });
+
+    /**
+     * POST /mint/prepare
+     *
+     * Builds a real Cardano minting transaction using Mesh SDK, signs it with
+     * the server-side policy wallet (POLICY_MNEMONIC), and returns the signed
+     * CBOR.  The caller can pass this CBOR to POST /mint/submit.
+     *
+     * The policy wallet is the fee payer — fund it with ≥ 5 ADA before use.
+     *
+     * Body:
+     *   rarefolio_token_id  string   e.g. "qd-silver-0000705"
+     *   collection_slug     string   e.g. "silverbar-01-founders"
+     *   asset_name_utf8     string   on-chain asset name (max 64 chars)
+     *   recipient_addr      string   bech32 or hex-CBOR destination address
+     *   cip25               object   CIP-25 per-token metadata
+     *
+     * Response:
+     *   { cbor_hex, policy_id, asset_name_hex, stub: false }
+     */
+    app.post('/mint/prepare', async (req: Request, res: Response, next: NextFunction) => {
         const parsed = MintRequest.safeParse(req.body);
         if (!parsed.success) {
-            return res.status(400).json({ error: 'invalid mint request', issues: parsed.error.issues });
+            return res.status(400).json({
+                error:  'invalid mint request',
+                issues: parsed.error.issues,
+            });
         }
-        const {
-            rarefolio_token_id,
-            asset_name_utf8,
-            recipient_addr,
-            policy_id,
-            cip25,
-        } = parsed.data;
 
-        const asset_name_hex = Buffer.from(asset_name_utf8, 'utf8').toString('hex');
+        const { rarefolio_token_id, collection_slug, asset_name_utf8, recipient_addr, cip25 } = parsed.data;
+        const assetNameHex   = Buffer.from(asset_name_utf8, 'utf8').toString('hex');
+        const recipientBech  = normaliseAddress(recipient_addr);
 
-        // PHASE 1 STUB — return a descriptive envelope so the admin UI can verify
-        // the full pipeline is wired, end-to-end. Phase 2 replaces `cbor_hex`
-        // with a real, unsigned transaction produced by the tx builder.
-        res.json({
-            stub: true,
-            note: 'Phase 1 stub. Real tx building lands in Phase 2 (lucid/mesh + Aiken).',
-            request: {
-                rarefolio_token_id,
-                policy_id: policy_id ?? null,
+        try {
+            const wallet       = getPolicyWallet();
+            const forgingScript = getForgingScript();
+            const policyId     = getPolicyId();
+
+            // Wrap CIP-25 metadata in the standard 721 label structure:
+            // { "<policyId>": { "<assetName>": { ...metadata... } } }
+            const cip25Wrapped = {
+                [policyId]: {
+                    [asset_name_utf8]: cip25,
+                },
+            };
+
+            const mintAsset: Mint = {
+                assetName:     asset_name_utf8,
+                assetQuantity: '1',
+                label:         '721',
+                metadata:      cip25,   // Mesh wraps this under the 721 label
+                recipient:     recipientBech,
+            };
+
+            const tx = new Transaction({ initiator: wallet });
+            tx.mintAsset(forgingScript, mintAsset);
+            // Explicitly attach the 721 label so wallets display the full metadata.
+            tx.setMetadata(721, cip25Wrapped);
+
+            const unsignedTx = await tx.build();
+            const signedTx   = wallet.signTx(unsignedTx);
+
+            console.log(
+                `[mint/prepare] built tx for ${rarefolio_token_id} ` +
+                `(${asset_name_utf8}) policy=${policyId}`
+            );
+
+            res.json({
+                stub:           false,
+                cbor_hex:       signedTx,
+                policy_id:      policyId,
+                asset_name_hex: assetNameHex,
                 asset_name_utf8,
-                asset_name_hex,
-                recipient_addr,
-            },
-            cip25,
-            next_steps: [
-                'Sign off-chain policy script + derive policy_id',
-                'Lock CIP-27 royalty token on policy (rate 0.08, addr creator)',
-                'Build unsigned minting tx with native script witness',
-                'Return cbor_hex for wallet to sign via CIP-30',
-            ],
-        });
+                rarefolio_token_id,
+                collection_slug,
+                recipient_addr: recipientBech,
+            });
+        } catch (err) {
+            next(err);
+        }
+    });
+
+    /**
+     * POST /mint/submit
+     *
+     * Submits a signed tx CBOR to the Cardano network via Blockfrost.
+     * Returns the tx_hash on success.
+     *
+     * Body:
+     *   { cbor_hex: string }
+     *
+     * Response:
+     *   { tx_hash: string }
+     */
+    app.post('/mint/submit', async (req: Request, res: Response, next: NextFunction) => {
+        const parsed = SubmitRequest.safeParse(req.body);
+        if (!parsed.success) {
+            return res.status(400).json({ error: 'missing cbor_hex', issues: parsed.error.issues });
+        }
+
+        try {
+            const txHash = await bf().txSubmit(parsed.data.cbor_hex);
+            console.log(`[mint/submit] submitted tx_hash=${txHash}`);
+            res.json({ tx_hash: txHash });
+        } catch (err) {
+            next(err);
+        }
     });
 }
