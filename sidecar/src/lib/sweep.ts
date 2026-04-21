@@ -12,9 +12,19 @@
  *   7. Submit via Blockfrost (optional — set submit=false for dry-run)
  */
 
-import { Transaction } from '@meshsdk/core';
+import { Transaction, BlockfrostProvider, type UTxO } from '@meshsdk/core';
 import { bf }           from './blockfrost.js';
 import { getSplitWalletForKey } from './policy.js';
+
+// Lazily-built Mesh provider for fetching UTxOs in Mesh's expected shape.
+let _meshProvider: BlockfrostProvider | null = null;
+function meshProvider(): BlockfrostProvider {
+    if (_meshProvider) return _meshProvider;
+    const projectId = process.env.BLOCKFROST_API_KEY;
+    if (!projectId) throw new Error('BLOCKFROST_API_KEY is not set');
+    _meshProvider = new BlockfrostProvider(projectId);
+    return _meshProvider;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -70,12 +80,13 @@ export async function runSweep(
 ): Promise<SweepResult> {
 
     const wallet = getSplitWalletForKey(envKey);
+    const walletAddr = wallet.getPaymentAddress();
 
     // ------------------------------------------------------------------
-    // 1. Check balance
+    // 1. Check balance (fetch UTxOs via BlockfrostProvider — Mesh shape)
     // ------------------------------------------------------------------
-    const utxos        = await wallet.getUtxos();
-    const balanceLovelace = utxos.reduce((sum, u) => {
+    const utxos: UTxO[] = await meshProvider().fetchAddressUTxOs(walletAddr);
+    const balanceLovelace = utxos.reduce((sum: number, u: UTxO) => {
         const lovelace = u.output.amount.find((a: { unit: string }) => a.unit === 'lovelace');
         return sum + Number(lovelace?.quantity ?? 0);
     }, 0);
@@ -132,7 +143,7 @@ export async function runSweep(
     }
 
     const unsignedTx = await tx.build();
-    const signedTx   = wallet.signTx(unsignedTx);
+    const signedTx   = await wallet.signTx(unsignedTx);
 
     // ------------------------------------------------------------------
     // 5. Submit or return
@@ -174,8 +185,8 @@ export async function getSplitBalance(envKey: string): Promise<{
 }> {
     const wallet = getSplitWalletForKey(envKey);
     const addr   = wallet.getPaymentAddress();
-    const utxos  = await wallet.getUtxos();
-    const balance = utxos.reduce((sum, u) => {
+    const utxos: UTxO[]  = await meshProvider().fetchAddressUTxOs(addr);
+    const balance = utxos.reduce((sum: number, u: UTxO) => {
         const lovelace = u.output.amount.find((a: { unit: string }) => a.unit === 'lovelace');
         return sum + Number(lovelace?.quantity ?? 0);
     }, 0);

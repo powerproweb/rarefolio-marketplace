@@ -162,7 +162,7 @@ export function mountMintRoutes(app: Express): void {
             tx.setMetadata(721, cip25Wrapped);
 
             const unsignedTx = await tx.build();
-            const signedTx   = wallet.signTx(unsignedTx);
+            const signedTx   = await wallet.signTx(unsignedTx);
 
             console.log(
                 `[mint/prepare] built tx for ${rarefolio_token_id} ` +

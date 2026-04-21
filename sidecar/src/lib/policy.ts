@@ -18,7 +18,7 @@
 import {
     AppWallet,
     BlockfrostProvider,
-    ForgeScript,
+    deserializeAddress,
     resolveNativeScriptHash,
     type NativeScript,
 } from '@meshsdk/core';
@@ -57,10 +57,12 @@ const _walletCache = new Map<string, AppWallet>();
 
 function getOrBuildWallet(envVarName: string): AppWallet {
     if (_walletCache.has(envVarName)) return _walletCache.get(envVarName)!;
+    const provider = buildProvider();
     const wallet = new AppWallet({
         networkId: networkId(),
-        fetcher:   buildProvider(),
-        signer: { type: 'Mnemonic', words: readMnemonic(envVarName) },
+        fetcher:   provider,
+        submitter: provider,
+        key: { type: 'mnemonic', words: readMnemonic(envVarName) },
     });
     _walletCache.set(envVarName, wallet);
     return wallet;
@@ -100,7 +102,12 @@ export function getSplitWalletForKey(envKey: string): AppWallet {
 export function getNativeScriptForKey(envKey?: string, lockSlot?: number | null): NativeScript {
     const wallet      = getPolicyWalletForKey(envKey);
     const paymentAddr = wallet.getPaymentAddress();
-    const sigScript   = ForgeScript.withOneSignature(paymentAddr) as NativeScript;
+    // Derive the wallet's pub key hash and build the native script as JSON.
+    // NOTE: earlier versions of this file used ForgeScript.withOneSignature()
+    // which returns a hex-encoded forging script, not a NativeScript JSON.
+    // That caused a broken cast and inability to compose into a time-locked 'all' script.
+    const { pubKeyHash } = deserializeAddress(paymentAddr);
+    const sigScript: NativeScript = { type: 'sig', keyHash: pubKeyHash };
 
     // Resolve lock slot: explicit param > env var (legacy path only)
     let slot: number | null = lockSlot ?? null;
@@ -121,16 +128,19 @@ export function getNativeScriptForKey(envKey?: string, lockSlot?: number | null)
     return {
         type: 'all',
         scripts: [sigScript, { type: 'before', slot }],
-    } as NativeScript;
+    };
 }
 
 export function getPolicyIdForKey(envKey?: string, lockSlot?: number | null): string {
     return resolveNativeScriptHash(getNativeScriptForKey(envKey, lockSlot));
 }
 
-export function getForgingScriptForKey(envKey?: string, lockSlot?: number | null): string {
-    const script = getNativeScriptForKey(envKey, lockSlot);
-    return typeof script === 'string' ? script : JSON.stringify(script);
+/**
+ * Returns the NativeScript JSON for a collection. Mesh SDK's Transaction.mintAsset
+ * accepts the NativeScript directly, no hex serialization needed.
+ */
+export function getForgingScriptForKey(envKey?: string, lockSlot?: number | null): NativeScript {
+    return getNativeScriptForKey(envKey, lockSlot);
 }
 
 // ---------------------------------------------------------------------------
@@ -144,4 +154,4 @@ export function getNativeScript(): NativeScript { return getNativeScriptForKey()
 /** @deprecated Use getPolicyIdForKey() */
 export function getPolicyId(): string          { return getPolicyIdForKey(); }
 /** @deprecated Use getForgingScriptForKey() */
-export function getForgingScript(): string     { return getForgingScriptForKey(); }
+export function getForgingScript(): NativeScript { return getForgingScriptForKey(); }
