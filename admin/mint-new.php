@@ -10,6 +10,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
 
+use RareFolio\Auth;
 use RareFolio\Cip25\Validator;
 
 $errors   = [];
