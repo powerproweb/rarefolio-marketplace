@@ -51,7 +51,12 @@ foreach ($files as $file) {
         $pdo->exec($sql);
         $stmt = $pdo->prepare('INSERT INTO schema_migrations (filename) VALUES (?)');
         $stmt->execute([$name]);
-        $pdo->commit();
+        // MySQL implicitly commits open transactions when DDL statements run
+        // (CREATE TABLE / ALTER TABLE / etc.). Only commit if a transaction is
+        // still active; otherwise the INSERT above has already auto-committed.
+        if ($pdo->inTransaction()) {
+            $pdo->commit();
+        }
         fwrite(STDOUT, "ok    $name\n");
         $ran++;
     } catch (Throwable $e) {
