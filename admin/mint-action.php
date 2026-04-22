@@ -154,6 +154,11 @@ function callSidecarPrepare(array $row, ?string $recipient): array
 {
     $sidecar = new SidecarClient();
     $cip25 = json_decode($row['cip25_json'], true) ?: [];
+    // Derive policy_env_key from the collection_slug:
+    // last '-' segment uppercased. e.g. 'silverbar-01-founders' -> 'FOUNDERS'
+    $slug = (string) ($row['collection_slug'] ?? '');
+    $parts = $slug === '' ? [] : explode('-', $slug);
+    $policyEnvKey = $parts ? strtoupper((string) end($parts)) : null;
     $payload = [
         'rarefolio_token_id' => $row['rarefolio_token_id'],
         'collection_slug'    => $row['collection_slug'],
@@ -161,6 +166,7 @@ function callSidecarPrepare(array $row, ?string $recipient): array
         'asset_name_utf8'    => @hex2bin($row['asset_name_hex']) ?: $row['asset_name_hex'],
         'recipient_addr'     => $recipient ?: 'addr_test1qq_placeholder_recipient',
         'cip25'              => $cip25,
+        'policy_env_key'     => $policyEnvKey ?: null,
     ];
     return $sidecar->prepareMint(array_filter($payload, fn($v) => $v !== null));
 }
