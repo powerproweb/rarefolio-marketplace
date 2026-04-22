@@ -56,6 +56,16 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -p ${{ secrets.SFTP_PORT }} ${{ secrets.SFTP_HOST }} >> ~/.ssh/known_hosts
 
+      # ---- DEBUG (remove after confirmed) ----------------------------------
+      - name: Debug SSH auth
+        run: |
+          ssh -vvv -i ~/.ssh/deploy_key \
+              -o StrictHostKeyChecking=no \
+              -o BatchMode=yes \
+              -p ${{ secrets.SFTP_PORT }} \
+              ${{ secrets.SFTP_USER }}@${{ secrets.SFTP_HOST }} \
+              "echo SSH_OK" 2>&1 || true
+
       # ---- 1. Sync PHP application files via lftp SFTP --------------------
       - name: Install lftp
         run: sudo apt-get install -y lftp
