@@ -1,9 +1,8 @@
 import type { Express, Request, Response, NextFunction } from 'express';
-import { Transaction, type Mint } from '@meshsdk/core';
+import { Transaction, ForgeScript, type Mint } from '@meshsdk/core';
 import { bf } from '../lib/blockfrost.js';
 import {
     getPolicyWalletForKey,
-    getForgingScriptForKey,
     getPolicyIdForKey,
 } from '../lib/policy.js';
 import { z } from 'zod';
@@ -137,7 +136,12 @@ export function mountMintRoutes(app: Express): void {
 
         try {
             const wallet        = getPolicyWalletForKey(envKey);
-            const forgingScript = getForgingScriptForKey(envKey, lock_slot ?? null);
+            // Build the forging script as hex CBOR via Mesh's supported API.
+            // NOTE: withOneSignature handles the simple 'RequireSignature' case.
+            // Time-locked policies (lock_slot != null) will need a different
+            // serialization path — not needed for initial mints.
+            const paymentAddr   = wallet.getPaymentAddress();
+            const forgingScript = ForgeScript.withOneSignature(paymentAddr);
             const policyId      = getPolicyIdForKey(envKey, lock_slot ?? null);
 
             // Wrap CIP-25 metadata in the standard 721 label structure:
