@@ -1,11 +1,21 @@
 import type { Express, Request, Response, NextFunction } from 'express';
-import { Transaction, ForgeScript, type Mint } from '@meshsdk/core';
+import { Transaction, ForgeScript, BlockfrostProvider, type Mint } from '@meshsdk/core';
 import { bf } from '../lib/blockfrost.js';
 import {
     getPolicyWalletForKey,
     getPolicyIdForKey,
 } from '../lib/policy.js';
 import { z } from 'zod';
+
+// Lazily-built Mesh BlockfrostProvider for fetching UTxOs during tx build.
+let _meshProvider: BlockfrostProvider | null = null;
+function meshProvider(): BlockfrostProvider {
+    if (_meshProvider) return _meshProvider;
+    const projectId = process.env.BLOCKFROST_API_KEY;
+    if (!projectId) throw new Error('BLOCKFROST_API_KEY is not set');
+    _meshProvider = new BlockfrostProvider(projectId);
+    return _meshProvider;
+}
 
 // ---------------------------------------------------------------------------
 // Request schemas
@@ -160,10 +170,21 @@ export function mountMintRoutes(app: Express): void {
                 recipient:     recipientBech,
             };
 
-            // AppWallet implements IInitiator at runtime; 1.8.x type decls don't say so.
-            // Cast to any to unblock tsc. tx.mintAsset similarly accepts NativeScript JSON
-            // at runtime even though the type decl wants a hex string.
-            const tx = new Transaction({ initiator: wallet as any });
+            // Build a minimal IInitiator wrapper. AppWallet in Mesh 1.8.x
+            // does NOT itself implement getUtxos/getChangeAddress; Transaction
+            // expects those via the initiator. We bridge to BlockfrostProvider
+            // for UTxO lookup and reuse the wallet's payment address as change.
+            const provider = meshProvider();
+            const initiator = {
+                getUtxos:          async () => await provider.fetchAddressUTxOs(paymentAddr),
+                getChangeAddress:  async () => paymentAddr,
+                getCollateral:     async () => [] as any[],
+                getUsedAddresses:  async () => [paymentAddr],
+                signTx:            (hex: string) => wallet.signTx(hex),
+                submitTx:          async (hex: string) => await provider.submitTx(hex),
+            };
+
+            const tx = new Transaction({ initiator: initiator as any });
             tx.mintAsset(forgingScript as any, mintAsset);
             // Explicitly attach the 721 label so wallets display the full metadata.
             tx.setMetadata(721, cip25Wrapped);
