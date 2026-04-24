@@ -103,7 +103,7 @@ jobs:
           RESPONSE=$(curl -fsS \
             -X POST \
             -H "X-Deploy-Secret: ${{ secrets.DEPLOY_WEBHOOK_SECRET }}" \
-            "https://${{ secrets.SFTP_HOST }}/admin/run-migrations.php" 2>&1) || true
+            "https://market.rarefolio.io/admin/run-migrations.php" 2>&1) || true
           echo "Migration response: $RESPONSE"
 
       # ---- 3. Health check via public API ----------------------------------
@@ -111,7 +111,7 @@ jobs:
         run: |
           for i in $(seq 1 10); do
             STATUS=$(curl -fsS -o /dev/null -w "%{http_code}" \
-              "https://${{ secrets.SFTP_HOST }}/api/v1/health" 2>/dev/null || echo "000")
+              "https://market.rarefolio.io/api/v1/health" 2>/dev/null || echo "000")
             if [ "$STATUS" = "200" ]; then
               echo "API healthy (HTTP 200)"
               exit 0
