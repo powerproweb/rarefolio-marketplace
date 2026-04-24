@@ -10,6 +10,8 @@
  *   GET  /mint/policy-id          derive policy ID from POLICY_MNEMONIC
  *   GET  /sync/token/:unit        current owner lookup for a single asset
  *   GET  /sync/policy/:policyId   bulk ownership sync for a full policy
+ *   POST /auth/verify-signature   verify CIP-30 signData payload
+ *   POST /auth/reward-address     derive reward/stake address
  *   GET  /handle/:handle          ADA Handle -> address resolution
  */
 import 'dotenv/config';
@@ -21,6 +23,7 @@ import { mountSyncRoutes }    from './routes/sync.js';
 import { mountSweepRoutes }   from './routes/sweep.js';
 import { mountWebhookRoutes } from './routes/webhook.js';
 import { mountPaymentRoutes } from './routes/payment.js';
+import { mountAuthRoutes }    from './routes/auth.js';
 
 const VERSION = '0.2.0';
 
@@ -44,6 +47,7 @@ mountSyncRoutes(app);
 mountSweepRoutes(app);
 mountPaymentRoutes(app);
 mountWebhookRoutes(app);
+mountAuthRoutes(app);
 mountHandleRoutes(app);
 
 // Generic 404
