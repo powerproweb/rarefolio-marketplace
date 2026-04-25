@@ -1,0 +1,35 @@
+RAREFOLIO MARKET WORK CONTEXT (READ FIRST)
+Last updated (UTC): 2026-04-22
+
+SERVER NOTE (read every session)
+- Dedicated BlueHost Apache server — NOT shared hosting.
+- IP: 50.6.202.60. cPanel user: rarefolio.
+- Both rarefolio.io and market.rarefolio.io are on this server.
+- SSH SFTP works. Shell access requires cPanel → SSH Access → enable Normal Shell.
+- Current deploy: lftp SFTP (files) + HTTP migration endpoint (no shell needed).
+
+Canonical naming
+- This repo should be treated as: 01a_rarefolio_market
+- Old name that may still appear in paths/scripts: 01a_rarefolio_marketplace
+
+Current operational context (updated 2026-04-24)
+- Phase E.2 COMPLETE: all 8 Founders tokens minted on preprod (see docs/FOUNDERS_MINT_LOG.md)
+- Phase E.3 COMPLETE: IPFS folder CID applied to DB.
+  CID: bafybeigcsosusr5dvsgfkn4ox3sgqyr3gzmd4cal32guxijygxzpd5x6vy
+- Deploy pipeline: lftp SFTP + HTTP migration via admin/run-migrations.php
+  DEPLOY_WEBHOOK_SECRET is set in GitHub secrets and server .env
+- Shell access disabled on cPanel — must enable for sidecar CI/CD.
+
+Next: Phase F — mainnet migration
+1) Enable shell in cPanel → SSH Access → Normal Shell
+2) Generate fresh mainnet POLICY_MNEMONIC_FOUNDERS (never reuse preprod key)
+3) Decide time-lock policy BEFORE first mainnet mint
+4) Follow docs/LAUNCH_CHECKLIST.md Phase F checklist
+
+Do not skip
+- Never reuse preprod mnemonic/policy on mainnet
+- Time-lock decision is irreversible once first mint lands on-chain
+
+Folder-rename tracking
+- Requested rename: 01a_rarefolio_marketplace -> 01a_rarefolio_market.
+- Rename status: completed. Use 01a_rarefolio_market for all work.
