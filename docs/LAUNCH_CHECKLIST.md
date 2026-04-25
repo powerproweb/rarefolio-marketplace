@@ -1,7 +1,17 @@
 # RareFolio.io — Launch Checklist
 
-**Code baseline:** `226f175` (main)
-**Status:** Code complete. All remaining items are creative, operational, or chain work.
+**Code baseline:** `eef4c38` (main)
+**Status:** Preprod minting complete (E.2) + Founders CID replacement complete (E.3). Current gate is Phase F mainnet hardening.
+
+---
+
+## Current execution snapshot (2026-04-25)
+
+- [x] **E.2 complete:** all 8 Founders tokens minted + confirmed on preprod (`docs/FOUNDERS_MINT_LOG.md`)
+- [x] **E.3 complete:** CID replacement applied using `db/migrations/017_update_founders_ipfs_cids.sql` and `db/migrations/018_fix_founders_ipfs_cids.sql`
+- [ ] Enable cPanel **Normal Shell** access for sidecar CI/CD
+- [ ] Generate fresh mainnet `POLICY_MNEMONIC` (never reuse preprod key)
+- [ ] Finalize `POLICY_LOCK_SLOT` decision before first mainnet mint
 
 ---
 
@@ -30,9 +40,9 @@
   curl -I https://gateway.pinata.cloud/ipfs/<CID>
   # Expect: HTTP 200, Content-Type: image/jpeg
   ```
-- [ ] Update `db/migrations/007_seed_founders_block88_tokens.sql`
-  — replace every `ipfs://REPLACE_WITH_CID/qd-silver-XXXXXXX.jpg`
-    with the real `ipfs://Qm...` URI for each token
+- [x] Apply Founders CID replacement migrations:
+  - `db/migrations/017_update_founders_ipfs_cids.sql`
+  - `db/migrations/018_fix_founders_ipfs_cids.sql`
 - [ ] Verify the updated descriptions and character names look correct in the file
 - [ ] See `docs/MEDIA.md` for the full pinning workflow
 
@@ -41,7 +51,7 @@
 ## PHASE C — Server Setup (preprod first, then mainnet)
 
 - [ ] SSH into the server; confirm PHP 8.1+ and Node 20+ are available
-- [ ] Upload / pull latest code from `main` (`742f5ae`)
+- [ ] Upload / pull latest code from `main` (`eef4c38`)
 - [ ] Copy and configure both env files:
   - `cp .env.example .env` → fill in `DB_*`, `BLOCKFROST_API_KEY` (preprod), `ADMIN_USER`, `ADMIN_PASS`, `CORS_ALLOWED_ORIGINS`, webhook vars
   - `cp sidecar/.env.example sidecar/.env` → fill in `BLOCKFROST_API_KEY` (preprod), `POLICY_MNEMONIC` (see Phase D), `PLATFORM_PAYOUT_ADDR`, `CREATOR_ROYALTY_ADDR`
@@ -89,25 +99,26 @@
 
 ---
 
-## PHASE E — Mint the Founders Collection (preprod first)
+## PHASE E — Mint the Founders Collection (preprod first) — COMPLETE
 
-Do one token first, verify fully, then continue.
+Gate passed on 2026-04-24. See `docs/FOUNDERS_MINT_LOG.md` for tx hashes and verification evidence.
 
-- [ ] Log into `https://rarefolio.io/admin/login.php`
-- [ ] Open **Mint queue → Founders #1 (qd-silver-0000705)**
-- [ ] Confirm on-chain identifiers are correct: policy_id, asset_name_hex, image CID
-- [ ] Click **"Build & sign tx (sidecar)"** — review the JSON response
-- [ ] Click **"Submit to chain"** — record the tx_hash
-- [ ] Click **"Check confirmation"** every ~30 seconds until confirmed
-- [ ] Verify on the public API: `GET /api/v1/tokens/qd-silver-0000705`
+- [x] Log into `https://rarefolio.io/admin/login.php`
+- [x] Open **Mint queue → Founders #1 (qd-silver-0000705)**
+- [x] Confirm on-chain identifiers are correct: policy_id, asset_name_hex, image CID
+- [x] Click **"Build & sign tx (sidecar)"** — review the JSON response
+- [x] Click **"Submit to chain"** — record the tx_hash
+- [x] Click **"Check confirmation"** every ~30 seconds until confirmed
+- [x] Verify on the public API: `GET /api/v1/tokens/qd-silver-0000705`
   — confirm `primary_sale`: `"minted"`, `mint_tx_hash` is set
-- [ ] Check provenance: `admin/activity.php` should show a `mint` event
-- [ ] Verify webhook fired to main site: check `uploads/webhook-log/mint-complete.log` on the main site
-- [ ] Repeat for Founders #2–#8 (`qd-silver-0000706` through `qd-silver-0000712`)
+- [x] Check provenance: `admin/activity.php` should show a `mint` event
+- [x] Verify webhook fired to main site: check `uploads/webhook-log/mint-complete.log` on the main site
+- [x] Repeat for Founders #2–#8 (`qd-silver-0000706` through `qd-silver-0000712`)
 
 ---
 
 ## PHASE F — Pre-launch Hardening
+- [ ] Enable cPanel shell access (`SSH Access` → `Manage Shell Access` → `Normal Shell`)
 
 - [ ] Switch to mainnet: update `BLOCKFROST_NETWORK=mainnet` and `BLOCKFROST_API_KEY` (mainnet key) in both `.env` files
 - [ ] Generate a fresh mainnet `POLICY_MNEMONIC` (never reuse preprod keys)
