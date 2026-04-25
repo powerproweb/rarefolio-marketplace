@@ -1,7 +1,7 @@
 # RareFolio Marketplace — Project Status
 **Last updated:** 2026-04-25
 **Branch:** `main` (tracking `origin/main`)
-**Head commit:** `eef4c38`
+**Head commit:** `38dab6a`
 
 ---
 
@@ -13,16 +13,10 @@
   - `db/migrations/018_fix_founders_ipfs_cids.sql`
 - **Current focus:** Phase F mainnet readiness (operational cutover + irreversible policy decisions)
 
-## Local repository state (uncommitted)
+## Local repository state
 
-- Deleted:
-  - `rarefolio_marketplace_php_site_plan.md`
-- Untracked:
-  - `OZ_WORK_CONTEXT.txt`
-  - `rarefolio_market_php_site_plan.md`
-  - `scripts/sync_owner_0705.php`
-  - `sidecar/package-lock.json`
-  - `sidecar/scripts/`
+- Working tree is clean on `main` (no uncommitted changes)
+- `main` is synchronized with `origin/main`
 
 ---
 
